@@ -1,0 +1,167 @@
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+public class Main {
+    public static void main(String[] args) throws IOException{
+
+        try {
+            run(args);
+        } catch (IOException e) {
+            System.err.println("Error: " + e.getMessage());
+            return;
+        }
+    }
+
+    private static void run(String[] args) throws IOException {
+        argsLength(args);
+
+        String flag = getFlag(args);
+
+        List<Rating> ratings = CsvReader.readRatings(args[0]);
+
+        if (flag == null) {
+            runSong(ratings, args[1]);
+        } else if (flag.equals("-a")) {
+            runUser(ratings, args[1]);
+        } else if (flag.equals("-u")) {
+            runSimilarity(ratings, args[1]);
+        } else {
+            runPrediction(ratings, args[1]);
+        }
+    }
+
+    private static String getFlag(String[] args) throws IOException {
+        String flag = args.length == 3 ? args[2] : null;
+        flagCheck(flag);
+        if (!args[0].toLowerCase().endsWith(".csv")) {
+            throw new IOException("Error: Invalid input file type");
+        }
+        if (!args[1].toLowerCase().endsWith(".csv")) {
+            throw new IOException("Error: Invalid output file type");
+        }
+        return flag;
+    }
+
+    private static void flagCheck(String flag) throws IOException {
+        if (flag != null && !flag.equals("-a") && !flag.equals("-u") && !flag.equals("-p")) {
+            throw new IOException("Error: unsupported argument");
+        }
+    }
+
+    private static void argsLength(String[] args) throws IOException {
+        if (args.length < 2) {
+            throw new IOException("Error: Too few arguments");
+        }
+        if (args.length > 3) {
+            throw new IOException("Error: Too many arguments");
+        }
+    }
+
+    private static void runSong(List<Rating> ratings, String output) throws IOException {
+        Map<String, List<Integer>> ratingsBySong = new TreeMap<>();
+        for (Rating r : ratings) {
+            ratingsBySong.computeIfAbsent(r.getSong(), k -> new ArrayList<>()).add(r.getValue());
+        }
+
+        Map<String,SongSummary> summaries = new TreeMap<>();
+        for (Map.Entry<String, List<Integer>> entry :ratingsBySong.entrySet()) {
+            StatisticsCalculator calculator = new StatisticsCalculator();
+            for (int rating : entry.getValue()) {
+                calculator.addVariable(rating);
+            }
+            summaries.put(entry.getKey(), new SongSummary(
+                entry.getValue().size(),
+                calculator.getMean(),
+                calculator.getStandardDeviation()));
+        }
+
+        CsvWriter.writeSongStatistics(output, summaries);
+    }
+
+    private static void runUser(List<Rating> ratings, String output) throws IOException {
+        Map<String, Map<String, Integer>> ratingsByUser = new TreeMap<>();
+        for (Rating r : ratings) {
+            ratingsByUser.computeIfAbsent(r.getUser(), k -> new TreeMap<>()).put(r.getSong(), r.getValue());
+        }
+
+        UserFilter.removeUncooperativeUsers(ratingsByUser);
+
+        Set<String> allSongs = new TreeSet<>();
+
+        for (Map<String, Integer> songRatings : ratingsByUser.values()) {
+            allSongs.addAll(songRatings.keySet());
+        }
+
+        CsvWriter.writeUserRatings(output, ratingsByUser, allSongs);
+    }
+
+    private static void runSimilarity(List<Rating> ratings, String output) throws IOException{
+        Map<String, Map<String, Integer>> usersToRatings = groupByUser(ratings);
+        UserFilter.removeUncooperativeUsers(usersToRatings);
+
+        if(usersToRatings.size() < 2) {
+            throw new IOException("Error: Too few cooperative users");
+        }
+        
+        Map<String, Map<String, Double>> normalized = Normalizer.normalize(usersToRatings);
+        RatingMatrix matrix = RatingMatrix.fromNormalized(normalized);
+
+        List<SongProfile> songs = new ArrayList<>();
+        for (String song : matrix.getSongs()) {
+            songs.add(matrix.getSongProfile(song));
+        }
+
+        EuclideanSimilarity similarity = new EuclideanSimilarity();
+        SimilarityTable<SongProfile> table = new SimilarityTable<>(songs, similarity);
+        table.makeSimilarityTable();
+
+        CsvWriter.writeSimilarityTable(output, table);
+    }
+
+    private static void runPrediction(List<Rating> ratings, String output) throws IOException {
+        Map<String, Map<String, Integer>> usersToRatings = groupByUser(ratings);
+        
+        UserFilter.removeUncooperativeUsers(usersToRatings);
+
+        if(usersToRatings.size() < 2) {
+            throw new IOException("Error: Too few cooperative users");
+        }
+
+        Map<String, Map<String, Double>> normalized = Normalizer.normalize(usersToRatings);
+
+        RatingMatrix matrix = RatingMatrix.fromNormalized(normalized);
+
+        if (!matrix.hasMissingRatings()) {
+            throw new IOException("Error: No missing ratings");
+        }
+
+        List<UserProfile> users = new ArrayList<>();
+
+        for(String user : matrix.getUsers()) {
+            users.add(matrix.getUserProfile(user));
+        }
+
+        EuclideanSimilarity similarity = new EuclideanSimilarity();
+
+        SimilarityTable<UserProfile> table = new SimilarityTable<>(users, similarity);
+
+        table.makeSimilarityTable();
+
+        RatingPrediction predictor = new RatingPrediction(matrix, table, usersToRatings);
+
+        CsvWriter.writePredictions(output, predictor, matrix);
+    }
+
+    private static Map<String, Map<String, Integer>> groupByUser(List<Rating> ratings) {
+        Map<String, Map<String,Integer>> usersToRatings = new TreeMap<>();
+        for (Rating r : ratings) {
+            usersToRatings.computeIfAbsent(r.getUser(), k -> new TreeMap<>()).put(r.getSong(), r.getValue());
+        }
+        return usersToRatings;
+    }
+}
